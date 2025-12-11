@@ -1,0 +1,4 @@
+,isbn,consolidated_title,unique_rvk_notations,has_dnb_title,has_b3kat_title,has_slsp_title,has_dnb_rvk,has_b3kat_rvk,has_slsp_rvk
+0,9789054500070,<<The>> cutting edge : West Central African 19th century throwing knives in the National Museum of Ethnology Leiden,"[('LB 98520', 'Zentralafrika insgesamt')]",False,False,True,False,False,True
+1,9783643911100,"Expressions of religion : ethnography, performance and the senses","[('BE 3230', 'Textsammlungen'), ('LC 29000', 'Darstellung ohne geografischen Bezug'), ('BE 3250', 'Einzeldarstellungen')]",False,True,True,False,True,True
+2,9780873658690,Far & near : selections from the Peabody Museum of Archaeology & Ethnology,"[('LB 20610', 'USA')]",False,True,True,False,True,False
