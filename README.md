@@ -4,8 +4,8 @@
 
 - Initialize the project
 ```
-git clone [this repo]
-cd [to the folder]
+git clone https://github.com/NbtKmy/extract-rvk-notations.git
+cd extract-rvk-notations
 uv sync
 ```
 
