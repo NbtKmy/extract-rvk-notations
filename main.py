@@ -112,56 +112,137 @@ def metadata_query (bib_verbund, isbn):
     except requests.exceptions.HTTPError as err:
         raise SystemExit(err)
 
+def extract_metadata (isbn):
+    isbn_entry = {
+        "isbn": isbn,
+        "dnb_title": None,
+        "dnb_rvk_notations": [],
+        "b3kat_title": None,
+        "b3kat_rvk_notations": [],
+        "slsp_title": None,
+        "slsp_rvk_notations": []
+    }
+
+    # Query DNB
+    try:
+        t_DNB, rvk_ns_DNB = metadata_query("DNB", isbn)
+        isbn_entry["dnb_title"] = t_DNB
+        isbn_entry["dnb_rvk_notations"] = rvk_ns_DNB
+    except SystemExit as e:
+        print(f"Error querying DNB for ISBN {isbn}: {e}")
+
+    # Query B3KAT
+    try:
+        t_B3KAT, rvk_ns_B3KAT = metadata_query("B3KAT", isbn)
+        isbn_entry["b3kat_title"] = t_B3KAT
+        isbn_entry["b3kat_rvk_notations"] = rvk_ns_B3KAT
+    except SystemExit as e:
+        print(f"Error querying B3KAT for ISBN {isbn}: {e}")
+
+    # Query SLSP
+    try:
+        t_SLSP, rvk_ns_SLSP = metadata_query("SLSP", isbn)
+        isbn_entry["slsp_title"] = t_SLSP
+        isbn_entry["slsp_rvk_notations"] = rvk_ns_SLSP
+    except SystemExit as e:
+        print(f"Error querying SLSP for ISBN {isbn}: {e}")
+
+    time.sleep(3) # Zwischen den ISBN-Abfragen eine Pause einlegen
+    
+    return isbn_data
+    
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-f", "--file", required=True)
+    parser.add_argument("-o", "--output", required=True)
     args = parser.parse_args()
     filename = args.file
-    df = pd.read_excel(filename)
-    isbn_column = df["isbn"]
+    outputfile = args.output
 
-    # Datensammeln
+    df = pd.read_excel(filename, header=0)
+
+    cautions = []
     all_isbn_data = []
-    for isbn in isbn_column:
-        isbn_entry = {
-            "isbn": isbn,
-            "dnb_title": None,
-            "dnb_rvk_notations": [],
-            "b3kat_title": None,
-            "b3kat_rvk_notations": [],
-            "slsp_title": None,
-            "slsp_rvk_notations": []
-        }
+    for row in df.itertuples():
+        if row.ISBN.empty:
+            all_isbn_data.append(None)
+            cautions.append("Keine ISBN vorhanden")
+            continue
 
-        # Query DNB
-        try:
-            t_DNB, rvk_ns_DNB = metadata_query("DNB", isbn)
-            isbn_entry["dnb_title"] = t_DNB
-            isbn_entry["dnb_rvk_notations"] = rvk_ns_DNB
-        except SystemExit as e:
-            print(f"Error querying DNB for ISBN {isbn}: {e}")
+        isbn_list = str(row.ISBN).split(";")
+        cleaned_isbn_list = [isbn.strip() for isbn in isbn_list if isbn.strip()]
+        isbn = cleaned_isbn_list[0]
+        isbn_data = extract_metadata(isbn)
+        all_isbn_data.append(isbn_data)
 
-        # Query B3KAT
-        try:
-            t_B3KAT, rvk_ns_B3KAT = metadata_query("B3KAT", isbn)
-            isbn_entry["b3kat_title"] = t_B3KAT
-            isbn_entry["b3kat_rvk_notations"] = rvk_ns_B3KAT
-        except SystemExit as e:
-            print(f"Error querying B3KAT for ISBN {isbn}: {e}")
-
-        # Query SLSP
-        try:
-            t_SLSP, rvk_ns_SLSP = metadata_query("SLSP", isbn)
-            isbn_entry["slsp_title"] = t_SLSP
-            isbn_entry["slsp_rvk_notations"] = rvk_ns_SLSP
-        except SystemExit as e:
-            print(f"Error querying SLSP for ISBN {isbn}: {e}")
-
-        time.sleep(1) # Zwischen den ISBN-Abfragen eine Pause einlegen
-        all_isbn_data.append(isbn_entry)
-    
     print("Data Collected!")
+
+    consolidated_isbn_data = []
+    for isbn_entry in  all_isbn_data:
+        consolidated_entry = {
+            "consolidated_title": None,
+            "unique_rvk_notations": None,
+        }
+        if isbn_entry is None:
+            consolidated_isbn_data.append(consolidated_entry)
+            continue
+
+        consolidated_title = None
+        if isbn_entry["dnb_title"] is not None:
+            consolidated_title = isbn_entry["dnb_title"]
+        elif isbn_entry["b3kat_title"] is not None:
+            consolidated_title = isbn_entry["b3kat_title"]
+        elif isbn_entry["slsp_title"] is not None:
+            consolidated_title = isbn_entry["slsp_title"]
+
+        unique_rvk_notations_set = set()
+        for rvk in isbn_entry["dnb_rvk_notations"]:
+            unique_rvk_notations_set.add(rvk)
+        for rvk in isbn_entry["b3kat_rvk_notations"]:
+            unique_rvk_notations_set.add(rvk)
+        for rvk in isbn_entry["slsp_rvk_notations"]:
+            unique_rvk_notations_set.add(rvk)
+        unique_rvk_notations = list(unique_rvk_notations_set)
+        consolidated_entry = {
+            "consolidated_title": consolidated_title,
+            "unique_rvk_notations": unique_rvk_notations,
+        }
+        consolidated_isbn_data.append(consolidated_entry)
+
+    df_consolidated = pd.DataFrame(consolidated_isbn_data)
+    df_rvk = df_consolidated[[ "consolidated_title", "unique_rvk_notations"]]
+    df_rvk.to_csv("./data/extracted_rvk_data.csv", index=False)
+
+    rvk_callnums_part1 = []
+    for row in df_rvk.itertuples():
+        index = row.Index
+        
+        if row.unique_rvk_notations is None:
+            cautions[index] += "; Keine RVK-Notationen gefunden"
+            continue
+
+        if row.consolidated_title != df.at[index, "Title"]:
+            cautions[index] += "; Titelabweichung festgestellt"
+        
+        # Signatur mit RVK-Notation generieren
+        # Hier zum Test nur die erste RVK-Notation verwenden
+        # Struktur der Signatur: RVK-Notation + Publikationsjahr YYYY + Nummerus currens
+        first_rvk = row.unique_rvk_notations[0]
+        rvk_notation = first_rvk[0].replace(" ", "")
+        pub_year = str(df.at[index, "Publication Date"])
+        if len(pub_year) >= 4:
+            pub_year = pub_year[0:4]
+        rvk_sig_part1 = f"{rvk_notation} {pub_year}"
+        rvk_callnums_part1.append(rvk_sig_part1)
+
+
+
+
+
+    df_final.to_csv(outputfile, index=False)
+
+"""
     
     # Konsolidieren der Daten
     consolidated_isbn_data = []
@@ -220,7 +301,7 @@ def main():
         "has_slsp_rvk"
     ]]
 
-    df_final.to_csv("./data/result.csv")
-
+    df_final.to_csv(outputfile, index=False)
+"""
 if __name__ == "__main__":
     main()
