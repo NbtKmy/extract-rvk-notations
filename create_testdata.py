@@ -9,7 +9,7 @@ def main():
     df = pd.read_excel(filename, header=0)
     testdata_df = df[0:3000]
     print("Erstelle Testdatensatz mit 3000 Einträgen...")
-    testdata_df.to_excel("dev_data/testdata.xlsx", index=False)
+    testdata_df.to_excel("dev_data/testdata_3000.xlsx", index=False)
 
 if __name__ == "__main__":
     main()

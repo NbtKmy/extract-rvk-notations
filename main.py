@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import argparse
 import time
+import re
 
 # DNB SRU
 DNB_ENDPOINT = "https://services.dnb.de/sru/dnb?version=1.1&operation=searchRetrieve&query=marcxml.isbn="
@@ -53,8 +54,12 @@ def extract_rvk_name (string):
         r = requests.get(rvk_query)
         r.raise_for_status()
         json_res = r.json()
-        time.sleep(0.5) # RVK API nicht überlasten
-        return json_res["node"]["benennung"]
+        time.sleep(1) # RVK API nicht überlasten
+        # print(json_res)
+        if "node" in json_res:
+            return json_res["node"]["benennung"]
+        else:
+            return "Unknown RVK Notation"
 
     except requests.exceptions.HTTPError as err:
         raise SystemExit(err)
@@ -124,13 +129,15 @@ def extract_metadata (isbn):
     }
 
     # Query DNB
+    """
     try:
         t_DNB, rvk_ns_DNB = metadata_query("DNB", isbn)
         isbn_entry["dnb_title"] = t_DNB
         isbn_entry["dnb_rvk_notations"] = rvk_ns_DNB
     except SystemExit as e:
         print(f"Error querying DNB for ISBN {isbn}: {e}")
-
+    """
+    
     # Query B3KAT
     try:
         t_B3KAT, rvk_ns_B3KAT = metadata_query("B3KAT", isbn)
@@ -149,8 +156,14 @@ def extract_metadata (isbn):
 
     time.sleep(3) # Zwischen den ISBN-Abfragen eine Pause einlegen
     
-    return isbn_data
-    
+    return isbn_entry
+
+def extract_year(text):
+    if not text:
+        return None
+
+    m = re.search(r"(18|19|20)\d{2}", text)
+    return m.group(0) if m else None
 
 def main():
     parser = argparse.ArgumentParser()
@@ -165,7 +178,10 @@ def main():
     cautions = []
     all_isbn_data = []
     for row in df.itertuples():
-        if row.ISBN.empty:
+        if row.Index % 10 == 0:
+            print(f"Processing record {row.Index}...")
+        
+        if pd.isna(row.ISBN):
             all_isbn_data.append(None)
             cautions.append("Keine ISBN vorhanden")
             continue
@@ -175,8 +191,13 @@ def main():
         isbn = cleaned_isbn_list[0]
         isbn_data = extract_metadata(isbn)
         all_isbn_data.append(isbn_data)
+        cautions.append("")
 
     print("Data Collected!")
+    collected_data_df = pd.DataFrame(all_isbn_data)
+    collected_cautions = pd.DataFrame(cautions, columns=["caution"])
+    collected_data_df = pd.concat([df, collected_data_df, collected_cautions], axis=1)
+    collected_data_df.to_csv("./dev_data/collected_data_raw.csv", index=False)
 
     consolidated_isbn_data = []
     for isbn_entry in  all_isbn_data:
@@ -212,7 +233,7 @@ def main():
 
     df_consolidated = pd.DataFrame(consolidated_isbn_data)
     df_rvk = df_consolidated[[ "consolidated_title", "unique_rvk_notations"]]
-    df_rvk.to_csv("./data/extracted_rvk_data.csv", index=False)
+    # df_rvk.to_csv("./data/extracted_rvk_data.csv", index=False)
 
     rvk_callnums_part1 = []
     for row in df_rvk.itertuples():
@@ -220,6 +241,7 @@ def main():
         
         if row.unique_rvk_notations is None:
             cautions[index] += "; Keine RVK-Notationen gefunden"
+            rvk_callnums_part1.append(None)
             continue
 
         if row.consolidated_title != df.at[index, "Title"]:
@@ -228,80 +250,26 @@ def main():
         # Signatur mit RVK-Notation generieren
         # Hier zum Test nur die erste RVK-Notation verwenden
         # Struktur der Signatur: RVK-Notation + Publikationsjahr YYYY + Nummerus currens
+        print(row.unique_rvk_notations)
+        if row.unique_rvk_notations is None or len(row.unique_rvk_notations) == 0:
+            rvk_callnums_part1.append(None)
+            continue
+
         first_rvk = row.unique_rvk_notations[0]
         rvk_notation = first_rvk[0].replace(" ", "")
         pub_year = str(df.at[index, "Publication Date"])
-        if len(pub_year) >= 4:
-            pub_year = pub_year[0:4]
+        # Die eckigen Klammern entfernen, falls vorhanden (z.B. [1999]. )
+        pub_year = extract_year(pub_year)
+        if pub_year is None:
+            pub_year = "YYYY"
         rvk_sig_part1 = f"{rvk_notation} {pub_year}"
         rvk_callnums_part1.append(rvk_sig_part1)
 
+    df_rvk["rvk_callnum_part1"] = rvk_callnums_part1
+    df_rvk["caution"] = cautions
+
+    df_rvk.to_csv(outputfile, index=False)
 
 
-
-
-    df_final.to_csv(outputfile, index=False)
-
-"""
-    
-    # Konsolidieren der Daten
-    consolidated_isbn_data = []
-    for isbn_entry in all_isbn_data:
-        # Consolidate title
-        consolidated_title = None
-        if isbn_entry["dnb_title"] is not None:
-            consolidated_title = isbn_entry["dnb_title"]
-        elif isbn_entry["b3kat_title"] is not None:
-            consolidated_title = isbn_entry["b3kat_title"]
-        elif isbn_entry["slsp_title"] is not None:
-            consolidated_title = isbn_entry["slsp_title"]
-
-        unique_rvk_notations_set = set()
-        for rvk in isbn_entry["dnb_rvk_notations"]:
-            unique_rvk_notations_set.add(rvk)
-        for rvk in isbn_entry["b3kat_rvk_notations"]:
-            unique_rvk_notations_set.add(rvk)
-        for rvk in isbn_entry["slsp_rvk_notations"]:
-            unique_rvk_notations_set.add(rvk)
-        unique_rvk_notations = list(unique_rvk_notations_set)
-
-        consolidated_entry = {
-            "isbn": isbn_entry["isbn"],
-            "consolidated_title": consolidated_title,
-            "unique_rvk_notations": unique_rvk_notations,
-            "dnb_title": isbn_entry["dnb_title"],
-            "b3kat_title": isbn_entry["b3kat_title"],
-            "slsp_title": isbn_entry["slsp_title"],
-            "dnb_rvk_notations": isbn_entry["dnb_rvk_notations"],
-            "b3kat_rvk_notations": isbn_entry["b3kat_rvk_notations"],
-            "slsp_rvk_notations": isbn_entry["slsp_rvk_notations"]
-        }
-        consolidated_isbn_data.append(consolidated_entry)
-
-    # DF vorbereiten und Ausgeben
-    for entry in consolidated_isbn_data:
-        entry["has_dnb_title"] = entry["dnb_title"] is not None
-        entry["has_b3kat_title"] = entry["b3kat_title"] is not None
-        entry["has_slsp_title"] = entry["slsp_title"] is not None
-        entry["has_dnb_rvk"] = len(entry["dnb_rvk_notations"]) > 0
-        entry["has_b3kat_rvk"] = len(entry["b3kat_rvk_notations"]) > 0
-        entry["has_slsp_rvk"] = len(entry["slsp_rvk_notations"]) > 0
-
-    df_consolidated = pd.DataFrame(consolidated_isbn_data)
-
-    df_final = df_consolidated[[
-        "isbn",
-        "consolidated_title",
-        "unique_rvk_notations",
-        "has_dnb_title",
-        "has_b3kat_title",
-        "has_slsp_title",
-        "has_dnb_rvk",
-        "has_b3kat_rvk",
-        "has_slsp_rvk"
-    ]]
-
-    df_final.to_csv(outputfile, index=False)
-"""
 if __name__ == "__main__":
     main()
