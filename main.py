@@ -4,6 +4,13 @@ import pandas as pd
 import argparse
 import time
 import re
+import os
+import logging
+from datetime import datetime
+from tqdm import tqdm
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # DNB SRU
 DNB_ENDPOINT = "https://services.dnb.de/sru/dnb?version=1.1&operation=searchRetrieve&query=marcxml.isbn="
@@ -16,6 +23,12 @@ B3KAT_SUFFIX = "&maximumRecords=1"
 # Swisscovery
 SLSP_ENDPOINT = "https://swisscovery.slsp.ch/view/sru/41SLSP_NETWORK?version=1.2&operation=searchRetrieve&recordSchema=marcxml&query=alma.isbn="
 SLSP_SUFFIX = "&maximumRecords=1"
+
+# Header für API-Endpunkte
+my_contact = os.environ.get("MY_CONTACT")
+HEADER = {
+    "User-Agent": "Automatische Signatur-Erstellung mit RVK/1.0 (contact: " + my_contact + ")"
+}
 
 endpoint_dic = {
     "DNB": (DNB_ENDPOINT, DNB_SUFFIX),
@@ -51,7 +64,7 @@ def extract_rvk_name (string):
     rvk_notation = string.replace(" ", "+")
     rvk_query = RVK_API + rvk_notation + RVK_SUFFIX
     try:
-        r = requests.get(rvk_query)
+        r = requests.get(rvk_query, headers=HEADER, timeout=10)
         r.raise_for_status()
         json_res = r.json()
         time.sleep(1) # RVK API nicht überlasten
@@ -82,14 +95,19 @@ def extract_rvk (xml):
     soup = BeautifulSoup(xml, "xml")
 
     title = None
+    author = None
     title_field = soup.find("datafield", tag="245")
     if title_field:
         subfields = title_field.find_all("subfield")
         title_parts = []
+        author_parts = []
         for sf in subfields:
             if sf.get("code") in ["a", "b"]:
                 title_parts.append(sf.text.strip())
+            if sf.get("code") == "c":
+                author_parts.append(sf.text.strip())
         title = " : ".join(title_parts).strip()
+        author = "; ".join(author_parts).strip()
 
     rvk_notations = []
     rvk_fields = soup.find_all("datafield", tag="084")
@@ -101,7 +119,7 @@ def extract_rvk (xml):
                     rvk_notation = rvk_notation_subfield.text.strip()
                     rvk_benennung = extract_rvk_name(rvk_notation)
                     rvk_notations.append((rvk_notation, rvk_benennung))
-    return title, rvk_notations
+    return title, author, rvk_notations
 
 def metadata_query (bib_verbund, isbn):
     url_prefix = endpoint_dic[bib_verbund][0]
@@ -109,10 +127,10 @@ def metadata_query (bib_verbund, isbn):
     url_query = url_prefix + str(isbn) + url_suffix
 
     try:
-        metadata_res = requests.get(url_query)
+        metadata_res = requests.get(url_query, headers=HEADER, timeout=10)
         metadata_res.raise_for_status()
-        title, rvk_notations = extract_rvk(metadata_res.text)
-        return title, rvk_notations
+        title, author, rvk_notations = extract_rvk(metadata_res.text)
+        return title, author, rvk_notations
 
     except requests.exceptions.HTTPError as err:
         raise SystemExit(err)
@@ -121,10 +139,13 @@ def extract_metadata (isbn):
     isbn_entry = {
         "isbn": isbn,
         "dnb_title": None,
+        "dnb_author": None,
         "dnb_rvk_notations": [],
         "b3kat_title": None,
+        "b3kat_author": None,
         "b3kat_rvk_notations": [],
         "slsp_title": None,
+        "slsp_author": None,
         "slsp_rvk_notations": []
     }
 
@@ -140,16 +161,18 @@ def extract_metadata (isbn):
     
     # Query B3KAT
     try:
-        t_B3KAT, rvk_ns_B3KAT = metadata_query("B3KAT", isbn)
+        t_B3KAT, a_B3KAT, rvk_ns_B3KAT = metadata_query("B3KAT", isbn)
         isbn_entry["b3kat_title"] = t_B3KAT
+        isbn_entry["b3kat_author"] = a_B3KAT
         isbn_entry["b3kat_rvk_notations"] = rvk_ns_B3KAT
     except SystemExit as e:
         print(f"Error querying B3KAT for ISBN {isbn}: {e}")
 
     # Query SLSP
     try:
-        t_SLSP, rvk_ns_SLSP = metadata_query("SLSP", isbn)
+        t_SLSP, a_SLSP, rvk_ns_SLSP = metadata_query("SLSP", isbn)
         isbn_entry["slsp_title"] = t_SLSP
+        isbn_entry["slsp_author"] = a_SLSP
         isbn_entry["slsp_rvk_notations"] = rvk_ns_SLSP
     except SystemExit as e:
         print(f"Error querying SLSP for ISBN {isbn}: {e}")
@@ -169,31 +192,53 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-f", "--file", required=True)
     parser.add_argument("-o", "--output", required=True)
+    parser.add_argument("-l", "--logfile", default="rvk_extraction.log", help="Log file path")
     args = parser.parse_args()
     filename = args.file
     outputfile = args.output
+    logfile = args.logfile
+
+    # Logging konfigurieren
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(logfile, encoding='utf-8'),
+            logging.StreamHandler()
+        ]
+    )
+
+    # 実行開始時刻を記録
+    start_time = datetime.now()
+    logging.info(f"=== Starting RVK extraction ===")
+    logging.info(f"Input file: {filename}")
+    logging.info(f"Output file: {outputfile}")
+    logging.info(f"Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     df = pd.read_excel(filename, header=0)
+    total_records = len(df)
+    logging.info(f"Number of records: {total_records}")
 
     cautions = []
     all_isbn_data = []
-    for row in df.itertuples():
-        if row.Index % 10 == 0:
-            print(f"Processing record {row.Index}...")
-        
+
+    
+    for row in tqdm(df.itertuples(), total=total_records, desc="Getting metadata for ISBNs"):
         if pd.isna(row.ISBN):
             all_isbn_data.append(None)
             cautions.append("Keine ISBN vorhanden")
+            logging.debug(f"Record {row.Index}: ISBN不明")
             continue
 
         isbn_list = str(row.ISBN).split(";")
         cleaned_isbn_list = [isbn.strip() for isbn in isbn_list if isbn.strip()]
         isbn = cleaned_isbn_list[0]
+        logging.debug(f"Record {row.Index}: ISBN {isbn} を処理中")
         isbn_data = extract_metadata(isbn)
         all_isbn_data.append(isbn_data)
         cautions.append("")
 
-    print("Data Collected!")
+    logging.info("Data collected!")
     collected_data_df = pd.DataFrame(all_isbn_data)
     collected_cautions = pd.DataFrame(cautions, columns=["caution"])
     collected_data_df = pd.concat([df, collected_data_df, collected_cautions], axis=1)
@@ -204,18 +249,19 @@ def main():
         consolidated_entry = {
             "consolidated_title": None,
             "unique_rvk_notations": None,
+            "author": None,
         }
         if isbn_entry is None:
             consolidated_isbn_data.append(consolidated_entry)
             continue
 
         consolidated_title = None
-        if isbn_entry["dnb_title"] is not None:
-            consolidated_title = isbn_entry["dnb_title"]
-        elif isbn_entry["b3kat_title"] is not None:
+        if isbn_entry["b3kat_title"] is not None:
             consolidated_title = isbn_entry["b3kat_title"]
         elif isbn_entry["slsp_title"] is not None:
             consolidated_title = isbn_entry["slsp_title"]
+        elif isbn_entry["dnb_title"] is not None:
+            consolidated_title = isbn_entry["dnb_title"]
 
         unique_rvk_notations_set = set()
         for rvk in isbn_entry["dnb_rvk_notations"]:
@@ -225,14 +271,16 @@ def main():
         for rvk in isbn_entry["slsp_rvk_notations"]:
             unique_rvk_notations_set.add(rvk)
         unique_rvk_notations = list(unique_rvk_notations_set)
+
         consolidated_entry = {
             "consolidated_title": consolidated_title,
             "unique_rvk_notations": unique_rvk_notations,
+            "author": isbn_entry["b3kat_author"] if isbn_entry["b3kat_author"] is not None else isbn_entry["slsp_author"]
         }
         consolidated_isbn_data.append(consolidated_entry)
 
     df_consolidated = pd.DataFrame(consolidated_isbn_data)
-    df_rvk = df_consolidated[[ "consolidated_title", "unique_rvk_notations"]]
+    df_rvk = df_consolidated[[ "consolidated_title", "unique_rvk_notations", "author"]]
     # df_rvk.to_csv("./data/extracted_rvk_data.csv", index=False)
 
     rvk_callnums_part1 = []
@@ -269,6 +317,23 @@ def main():
     df_rvk["caution"] = cautions
 
     df_rvk.to_csv(outputfile, index=False)
+
+    
+    end_time = datetime.now()
+    elapsed_time = end_time - start_time
+    hours, remainder = divmod(elapsed_time.total_seconds(), 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    logging.info(f"=== Task finished ===")
+    logging.info(f"Endtime: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logging.info(f"Duration: {int(hours)} H {int(minutes)} Min {int(seconds)} Sec")
+    logging.info(f"Outputfile: {outputfile}")
+
+    print(f"\n{'='*50}")
+    print(f"Task finished!")
+    print(f"Duration: {int(hours)} H, {int(minutes)} Min, {int(seconds)} Sec")
+    print(f"Please see the logfile for further information: {logfile}")
+    print(f"{'='*50}")
 
 
 if __name__ == "__main__":
