@@ -19,4 +19,5 @@ Thumbs.db
 # Sonstige Dateien
 dev_data/
 
-
+# env
+.env
