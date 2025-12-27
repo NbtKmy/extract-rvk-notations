@@ -18,6 +18,13 @@ Thumbs.db
 
 # Sonstige Dateien
 dev_data/
+private_instruction.md
+*.log
 
 # env
 .env
+
+# requests-cache
+rvk_api_cache.sqlite*
+*.sqlite
+

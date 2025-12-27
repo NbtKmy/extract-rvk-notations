@@ -1,4 +1,5 @@
 import requests
+import requests_cache
 from bs4 import BeautifulSoup
 import pandas as pd
 import argparse
@@ -9,6 +10,7 @@ import logging
 from datetime import datetime
 from tqdm import tqdm
 from dotenv import load_dotenv
+import pytz
 
 load_dotenv()
 
@@ -60,22 +62,35 @@ RVK_SUFFIX = "?json"
 # }
 
 
-def extract_rvk_name (string):
+def extract_rvk_name (string, max_retries=3, timeout=30):
     rvk_notation = string.replace(" ", "+")
     rvk_query = RVK_API + rvk_notation + RVK_SUFFIX
-    try:
-        r = requests.get(rvk_query, headers=HEADER, timeout=10)
-        r.raise_for_status()
-        json_res = r.json()
-        time.sleep(1) # RVK API nicht überlasten
-        # print(json_res)
-        if "node" in json_res:
-            return json_res["node"]["benennung"]
-        else:
-            return "Unknown RVK Notation"
 
-    except requests.exceptions.HTTPError as err:
-        raise SystemExit(err)
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(rvk_query, headers=HEADER, timeout=timeout)
+            r.raise_for_status()
+            json_res = r.json()
+            time.sleep(1) # RVK API nicht überlasten
+            # print(json_res)
+            if "node" in json_res:
+                return json_res["node"]["benennung"]
+            else:
+                return "Unknown RVK Notation"
+
+        except requests.exceptions.Timeout as err:
+            logging.warning(f"Timeout error for RVK notation {string} (attempt {attempt+1}/{max_retries}): {err}")
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                logging.info(f"Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                logging.error(f"Failed after {max_retries} attempts for RVK notation {string}")
+                return "Unknown RVK Notation (Timeout)"
+
+        except requests.exceptions.RequestException as err:
+            logging.error(f"Request error for RVK notation {string}: {err}")
+            return "Unknown RVK Notation (Error)"
 
 
 # RVK-Notation herausfiltern (es gibt mehrfach RVK-Notation)
@@ -121,19 +136,31 @@ def extract_rvk (xml):
                     rvk_notations.append((rvk_notation, rvk_benennung))
     return title, author, rvk_notations
 
-def metadata_query (bib_verbund, isbn):
+def metadata_query (bib_verbund, isbn, max_retries=3, timeout=30):
     url_prefix = endpoint_dic[bib_verbund][0]
     url_suffix = endpoint_dic[bib_verbund][1]
     url_query = url_prefix + str(isbn) + url_suffix
 
-    try:
-        metadata_res = requests.get(url_query, headers=HEADER, timeout=10)
-        metadata_res.raise_for_status()
-        title, author, rvk_notations = extract_rvk(metadata_res.text)
-        return title, author, rvk_notations
+    for attempt in range(max_retries):
+        try:
+            metadata_res = requests.get(url_query, headers=HEADER, timeout=timeout)
+            metadata_res.raise_for_status()
+            title, author, rvk_notations = extract_rvk(metadata_res.text)
+            return title, author, rvk_notations
 
-    except requests.exceptions.HTTPError as err:
-        raise SystemExit(err)
+        except requests.exceptions.Timeout as err:
+            logging.warning(f"Timeout error for {bib_verbund} ISBN {isbn} (attempt {attempt+1}/{max_retries}): {err}")
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                logging.info(f"Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                logging.error(f"Failed after {max_retries} attempts for {bib_verbund} ISBN {isbn}")
+                raise SystemExit(err)
+
+        except requests.exceptions.RequestException as err:
+            logging.error(f"Request error for {bib_verbund} ISBN {isbn}: {err}")
+            raise SystemExit(err)
 
 def extract_metadata (isbn):
     isbn_entry = {
@@ -188,6 +215,30 @@ def extract_year(text):
     m = re.search(r"(18|19|20)\d{2}", text)
     return m.group(0) if m else None
 
+def check_b3kat_maintenance_window():
+    """
+    B3kat Wartungszeit CET 5:00-5:30
+    Von CET 4:59 bis 5:31 prüfen und ggf. warten
+    """
+    cet = pytz.timezone('Europe/Berlin')
+    current_time_cet = datetime.now(cet)
+    current_hour = current_time_cet.hour
+    current_minute = current_time_cet.minute
+
+    # CET 4:59～5:30 für B3kat Wartungsfenster prüfen
+    if (current_hour == 4 and current_minute >= 59) or (current_hour == 5 and current_minute < 31):
+        logging.warning(f"B3Kat maintenance window detected. Current time: {current_time_cet.strftime('%H:%M:%S CET')}")
+
+        # By 5:31 warten
+        target_hour = 5
+        target_minute = 31
+        wait_minutes = (target_hour * 60 + target_minute) - (current_hour * 60 + current_minute)
+
+        if wait_minutes > 0:
+            logging.info(f"Sleeping for {wait_minutes} minutes until CET 5:31...")
+            time.sleep(wait_minutes * 60)
+            logging.info("Resuming after maintenance window")
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-f", "--file", required=True)
@@ -197,6 +248,13 @@ def main():
     filename = args.file
     outputfile = args.output
     logfile = args.logfile
+
+    # Caching all API responses (RVK, B3Kat, SLSP)
+    requests_cache.install_cache(
+        'api_cache',
+        backend='sqlite',
+        expire_after=2592000  # Cache behalten für 30 Tage
+    )
 
     # Logging konfigurieren
     logging.basicConfig(
@@ -208,32 +266,42 @@ def main():
         ]
     )
 
-    # 実行開始時刻を記録
+    # Startzeit erfassen
     start_time = datetime.now()
     logging.info(f"=== Starting RVK extraction ===")
     logging.info(f"Input file: {filename}")
     logging.info(f"Output file: {outputfile}")
     logging.info(f"Start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    df = pd.read_excel(filename, header=0)
+    file_extension = os.path.splitext(filename)[1].lower()
+    basename_without_ext = os.path.splitext(os.path.basename(filename))[0]
+    if file_extension == ".csv":
+        df = pd.read_csv(filename, header=0)
+    elif file_extension in [".xls", ".xlsx"]:
+        df = pd.read_excel(filename, header=0)
+    
+
     total_records = len(df)
     logging.info(f"Number of records: {total_records}")
 
     cautions = []
     all_isbn_data = []
 
-    
+
     for row in tqdm(df.itertuples(), total=total_records, desc="Getting metadata for ISBNs"):
+        # B3Katメンテナンス時間をチェック
+        check_b3kat_maintenance_window()
+
         if pd.isna(row.ISBN):
             all_isbn_data.append(None)
             cautions.append("Keine ISBN vorhanden")
-            logging.debug(f"Record {row.Index}: ISBN不明")
+            logging.debug(f"Record {row.Index}: ISBN unknown, skipping")
             continue
 
         isbn_list = str(row.ISBN).split(";")
         cleaned_isbn_list = [isbn.strip() for isbn in isbn_list if isbn.strip()]
         isbn = cleaned_isbn_list[0]
-        logging.debug(f"Record {row.Index}: ISBN {isbn} を処理中")
+        logging.debug(f"Record {row.Index}: ISBN {isbn} processing")
         isbn_data = extract_metadata(isbn)
         all_isbn_data.append(isbn_data)
         cautions.append("")
@@ -280,8 +348,16 @@ def main():
         consolidated_isbn_data.append(consolidated_entry)
 
     df_consolidated = pd.DataFrame(consolidated_isbn_data)
-    df_rvk = df_consolidated[[ "consolidated_title", "unique_rvk_notations", "author"]]
-    # df_rvk.to_csv("./data/extracted_rvk_data.csv", index=False)
+
+    # 元のデータフレームから必要なカラムを取り出す
+    df_original_cols = df[["MMS Id", "Publisher", "Publication Date", "Künftiger Standort"]].copy()
+
+    # 統合されたデータと元のカラムを結合
+    df_rvk = pd.concat([
+        df_original_cols.reset_index(drop=True),
+        df_consolidated[["consolidated_title", "unique_rvk_notations", "author"]].reset_index(drop=True)
+    ], axis=1)
+    # df_rvk.to_csv(f"./dev_data/{basename_without_ext}_result.csv", index=False)
 
     rvk_callnums_part1 = []
     for row in df_rvk.itertuples():
@@ -298,7 +374,7 @@ def main():
         # Signatur mit RVK-Notation generieren
         # Hier zum Test nur die erste RVK-Notation verwenden
         # Struktur der Signatur: RVK-Notation + Publikationsjahr YYYY + Nummerus currens
-        print(row.unique_rvk_notations)
+        # print(row.unique_rvk_notations)
         if row.unique_rvk_notations is None or len(row.unique_rvk_notations) == 0:
             rvk_callnums_part1.append(None)
             continue
@@ -318,11 +394,15 @@ def main():
 
     df_rvk.to_csv(outputfile, index=False)
 
-    
+
     end_time = datetime.now()
     elapsed_time = end_time - start_time
     hours, remainder = divmod(elapsed_time.total_seconds(), 3600)
     minutes, seconds = divmod(remainder, 60)
+
+    # キャッシュ統計情報を出力
+    cache_info = requests_cache.get_cache()
+    logging.info(f"Cache stats: {len(cache_info.responses)} responses cached")
 
     logging.info(f"=== Task finished ===")
     logging.info(f"Endtime: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
