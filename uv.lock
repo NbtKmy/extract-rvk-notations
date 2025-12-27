@@ -173,9 +173,13 @@ dependencies = [
     { name = "openpyxl" },
     { name = "pandas" },
     { name = "python-dotenv" },
+<<<<<<< HEAD
     { name = "pytz" },
     { name = "requests" },
     { name = "requests-cache" },
+=======
+    { name = "requests" },
+>>>>>>> fd63de04995698934e6f073b3ce4aea4ec2611cd
     { name = "tqdm" },
 ]
 
@@ -187,9 +191,13 @@ requires-dist = [
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
+<<<<<<< HEAD
     { name = "pytz", specifier = ">=2024.2" },
     { name = "requests", specifier = ">=2.32.5" },
     { name = "requests-cache", specifier = ">=1.2.1" },
+=======
+    { name = "requests", specifier = ">=2.32.5" },
+>>>>>>> fd63de04995698934e6f073b3ce4aea4ec2611cd
     { name = "tqdm", specifier = ">=4.67.0" },
 ]
 

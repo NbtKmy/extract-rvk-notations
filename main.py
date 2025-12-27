@@ -289,7 +289,7 @@ def main():
 
 
     for row in tqdm(df.itertuples(), total=total_records, desc="Getting metadata for ISBNs"):
-        # B3Katメンテナンス時間をチェック
+        # Check B3Kat maintenance window
         check_b3kat_maintenance_window()
 
         if pd.isna(row.ISBN):
@@ -348,11 +348,13 @@ def main():
         consolidated_isbn_data.append(consolidated_entry)
 
     df_consolidated = pd.DataFrame(consolidated_isbn_data)
+    df_rvk = df_consolidated[[ "consolidated_title", "unique_rvk_notations", "author"]]
+    # df_rvk.to_csv("./data/extracted_rvk_data.csv", index=False)
 
-    # 元のデータフレームから必要なカラムを取り出す
+    # Collumns aus den Originaldaten übernehmen
     df_original_cols = df[["MMS Id", "Publisher", "Publication Date", "Künftiger Standort"]].copy()
 
-    # 統合されたデータと元のカラムを結合
+    # Concat der DataFrames
     df_rvk = pd.concat([
         df_original_cols.reset_index(drop=True),
         df_consolidated[["consolidated_title", "unique_rvk_notations", "author"]].reset_index(drop=True)
@@ -394,13 +396,12 @@ def main():
 
     df_rvk.to_csv(outputfile, index=False)
 
-
     end_time = datetime.now()
     elapsed_time = end_time - start_time
     hours, remainder = divmod(elapsed_time.total_seconds(), 3600)
     minutes, seconds = divmod(remainder, 60)
 
-    # キャッシュ統計情報を出力
+    # Cache-Statistiken ausgeben
     cache_info = requests_cache.get_cache()
     logging.info(f"Cache stats: {len(cache_info.responses)} responses cached")
 
